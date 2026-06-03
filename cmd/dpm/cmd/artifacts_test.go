@@ -1,8 +1,12 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	v1 "github.com/opencontainers/image-spec/specs-go/v1"
 	"io"
+	"oras.land/oras-go/v2"
 	"os"
 	"strings"
 	"testing"
@@ -80,6 +84,55 @@ func (suite *RepoSuite) TestPublishLicenselessDar() {
 		cmd.SetArgs(args)
 		require.Error(t, cmd.Execute())
 	})
+}
+
+func (suite *RepoSuite) TestPublishDarGenerateManifest() {
+	t := suite.T()
+
+	c, _ := testutil.StartRegistry(t)
+
+	tmpDamlHome, err := os.MkdirTemp("", "")
+	require.NoError(t, err)
+	t.Setenv(assistantconfig.DpmHomeEnvVar, tmpDamlHome)
+	destinationRegistry := os.Getenv(assistantconfig.OciRegistryEnvVar)
+
+	t.Run("Ensure manifest created", func(t *testing.T) {
+		cmd := createStdTestRootCmd(t)
+		args := []string{
+			"publish", "dar", fmt.Sprintf("oci://%s/meep:1.2.3", destinationRegistry),
+			"-f", testutil.TestdataPath(t, "test-dar"),
+		}
+
+		if os.Getenv(assistantconfig.AllowInsecureRegistryEnvVar) == "true" {
+			args = append(args, "--insecure")
+		}
+
+		cmd.SetArgs(args)
+		require.NoError(t, cmd.Execute())
+		repo, err := c.Repo("meep")
+		assert.NoError(t, err)
+
+		desc, bytes, err := oras.FetchBytes(t.Context(), repo, "1.2.3", oras.DefaultFetchBytesOptions)
+		assert.NoError(t, err)
+
+		assert.Equal(t, desc.MediaType, v1.MediaTypeImageManifest)
+
+		manifest := v1.Manifest{}
+		assert.NoError(t, json.Unmarshal(bytes, &manifest))
+
+		fileNames := make([]string, 3)
+		for _, layer := range manifest.Layers {
+			name, _ := layer.Annotations[ocispec.AnnotationTitle]
+			fileNames = append(fileNames, name)
+		}
+
+		assert.Contains(t, fileNames, "test.dar", "Expected test.dar layer with test.dar name annotation, but none found")
+		assert.Contains(t, fileNames, "LICENSE", "Expected LICENSE layer with LICENSE name annotation but none found")
+		assert.Contains(t, fileNames, assistantconfig.DarManifestName, "Expected dar.yaml layer with dar.yaml name annotation but none found")
+
+		assert.NoFileExists(t, testutil.TestdataPath(t, "test-dar", assistantconfig.DarManifestName), "Expected dar.yaml manifest to not be present in the original directory, but it was")
+	})
+
 }
 
 func (suite *RepoSuite) TestPublishThirdPartyComponents() {
