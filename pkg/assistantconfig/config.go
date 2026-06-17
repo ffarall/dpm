@@ -378,6 +378,14 @@ func DpmLockfileEnabled() bool {
 	return os.Getenv(DpmLockfileEnabledEnvVar) == "true"
 }
 
+func ShaPinningEnabled() bool {
+	return os.Getenv(DpmShaPinningEnabled) == "true"
+}
+
 func (c *Config) CachePathForDar(ref *registry.Reference) string {
+	if ShaPinningEnabled() {
+		sha := strings.ReplaceAll(ref.Reference, "sha256:", "")
+		return filepath.Join(c.CachePath, "dars", "sha256", sha)
+	}
 	return filepath.Join(c.CachePath, "dars", utils.UrlToFilePath(fmt.Sprintf("%s/%s", ref.Registry, ref.Repository)), ref.Reference)
 }

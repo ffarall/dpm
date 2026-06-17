@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	"daml.com/x/assistant/pkg/assembler"
 	"daml.com/x/assistant/pkg/assembler/assemblyplan"
@@ -121,14 +122,14 @@ func processDamlPackage(ctx context.Context, cmd *cobra.Command, config *assista
 
 func installDars(ctx context.Context, config *assistantconfig.Config, dars []*damlpackage.ParsedDarDependency) error {
 	for _, d := range dars {
-		if err := installDar(ctx, config, d); err != nil {
+		if err := InstallDar(ctx, config, d); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func installDar(ctx context.Context, config *assistantconfig.Config, dar *damlpackage.ParsedDarDependency) error {
+func InstallDar(ctx context.Context, config *assistantconfig.Config, dar *damlpackage.ParsedDarDependency) error {
 	if dar.FullUrl.Scheme != "oci" {
 		return nil
 	}
@@ -139,8 +140,16 @@ func installDar(ctx context.Context, config *assistantconfig.Config, dar *damlpa
 		return err
 	}
 
-	if ocilister.IsFloaty(ref.Reference) {
+	if !assistantconfig.ShaPinningEnabled() && ocilister.IsFloaty(ref.Reference) {
 		return fmt.Errorf("tag not allowed in %q: only strict semver OCI tags are supported currently", dar.FullUrl.String())
+	}
+
+	if assistantconfig.ShaPinningEnabled() {
+		if !strings.Contains(ref.Reference, "sha256:") {
+			// TODO support having `dpm install` resolve to sha256
+			// when the dar uri in daml.yaml doesn't already include it
+			return fmt.Errorf("currently 'dpm install' requires dar oci URIs in daml.yaml to include '@sha256'. Prefer 'dpm add dar' command to add dars to your daml.yaml")
+		}
 	}
 
 	puller := remotepuller.New(config.OciLayoutCache, client)

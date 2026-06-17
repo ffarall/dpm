@@ -66,4 +66,6 @@ const (
 	DpmSdkVersionEnvVar = "DPM_SDK_VERSION"
 
 	DpmLockfileEnabledEnvVar = "DPM_LOCKFILE_ENABLED"
+
+	DpmShaPinningEnabled = "DPM_SHA_PINNING_ENABLED"
 )
