@@ -64,7 +64,7 @@ func InstallPackage(config *assistantconfig.Config, cmd *cobra.Command) error {
 			}
 		}
 
-		if err := installOverrides(ctx, cmd, config, multiPackagePath, false); err != nil {
+		if err := installMultiPackageYamlComponentsOnly(ctx, cmd, config); err != nil {
 			return err
 		}
 		pkgs := multiDamlPackage.AbsolutePackages()
@@ -75,7 +75,7 @@ func InstallPackage(config *assistantconfig.Config, cmd *cobra.Command) error {
 			if err := processDamlPackage(ctx, cmd, modifiedConfig, damlPackagePath); err != nil {
 				return err
 			}
-			if err := installOverrides(ctx, cmd, config, damlPackagePath, true); err != nil {
+			if err := installOverridesForPackage(ctx, cmd, config, damlPackagePath); err != nil {
 				return err
 			}
 		}
@@ -91,7 +91,7 @@ func InstallPackage(config *assistantconfig.Config, cmd *cobra.Command) error {
 		if err := processDamlPackage(ctx, cmd, modifiedConfig, damlPackagePath); err != nil {
 			return err
 		}
-		return installOverrides(ctx, cmd, config, damlPackagePath, false)
+		return installOverridesForPackage(ctx, cmd, config, damlPackagePath)
 	}
 
 	return nil
@@ -141,7 +141,8 @@ func installDars(ctx context.Context, config *assistantconfig.Config, dars []*da
 		// now update daml.yaml if we had to append a @sha256
 		if updatedDar != nil {
 			quotedUri := fmt.Sprintf("\"%s\"", updatedDar.StringWithAlias())
-			return yamledit.EditYaml(yamlTarget, quotedUri, updatedDar.Index)
+			yamlTarget.Index = updatedDar.Index
+			return yamledit.EditYaml(yamlTarget, quotedUri)
 		}
 	}
 	return nil
@@ -163,12 +164,12 @@ func InstallDar(ctx context.Context, config *assistantconfig.Config, dar *damlpa
 	}
 
 	if assistantconfig.ShaPinningEnabled() && !strings.Contains(dar.FullUrl.String(), "@sha256:") {
-		ociManifest, err := ocilister.FetchManifest(ctx, client, *ref)
+		resolvedDigest, _, err := ocilister.FetchManifest(ctx, client, *ref)
 		if err != nil {
 			return nil, err
 		}
 
-		newUrl, err := url.Parse(dar.FullUrl.String() + "@" + ociManifest.Digest.String())
+		newUrl, err := url.Parse(dar.FullUrl.String() + "@" + resolvedDigest.String())
 		if err != nil {
 			return nil, err
 		}
@@ -203,7 +204,28 @@ func InstallDar(ctx context.Context, config *assistantconfig.Config, dar *damlpa
 	return updatedDar, nil
 }
 
-func installOverrides(ctx context.Context, cmd *cobra.Command, config *assistantconfig.Config, absPath string, sub bool) error {
+func installMultiPackageYamlComponentsOnly(ctx context.Context, cmd *cobra.Command, config *assistantconfig.Config) error {
+	puller, err := remotepuller.NewFromRemoteConfig(config)
+	if err != nil {
+		return err
+	}
+	a := assembler.New(config, puller)
+	assemblyPlan, err := assemblyplan.New(ctx, config, a)
+	if err != nil {
+		return err
+	}
+	assemblyPlan.DamlPackage = nil
+	if !assemblyPlan.HasOverrides() {
+		return nil
+	}
+	cmd.Println("Installing multi-package.yaml components...")
+	return utils.WithInstallLock(ctx, config.InstallLocalFilePath, func() error {
+		_, err := assemblyPlan.Assemble(ctx)
+		return err
+	})
+}
+
+func installOverridesForPackage(ctx context.Context, cmd *cobra.Command, config *assistantconfig.Config, absPath string) error {
 	puller, err := remotepuller.NewFromRemoteConfig(config)
 	if err != nil {
 		return err
@@ -213,9 +235,7 @@ func installOverrides(ctx context.Context, cmd *cobra.Command, config *assistant
 	if err != nil {
 		return err
 	}
-	if sub {
-		assemblyPlan.MultiPackage = nil
-	}
+	assemblyPlan.MultiPackage = nil
 	if !assemblyPlan.HasOverrides() {
 		cmd.Println("No opt-in components to install")
 		return nil

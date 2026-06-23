@@ -6,8 +6,8 @@ package sdkmanifest
 import (
 	"fmt"
 
+	"daml.com/x/assistant/pkg/yamledit"
 	"github.com/goccy/go-yaml"
-	"github.com/opencontainers/go-digest"
 )
 
 const AssistantName = "dpm" // this is also the OCI repo name
@@ -63,9 +63,8 @@ func (s *Spec) UnmarshalYAML(bytes []byte) error {
 }
 
 type Component struct {
-	Name    string         `yaml:"-"`
-	Version *SemVer        `yaml:"version,omitempty"`
-	Digest  *digest.Digest `yaml:"digest,omitempty"`
+	Name    string  `yaml:"-"`
+	Version *SemVer `yaml:"version,omitempty"`
 
 	// We don't yet have support for floaty or arbitrary tags (as that requires lockfiles),
 	// but the `dpm resolve-tags` command used in the assembly process for putting together
@@ -75,6 +74,8 @@ type Component struct {
 	ImageTag  *string `yaml:"image-tag,omitempty"`
 	LocalPath *string `yaml:"local-path,omitempty"`
 	Uri       *string `yaml:"uri,omitempty"`
+
+	YamlEditTarget *yamledit.YamlTarget `yaml:"-"`
 }
 
 // String returns representation meant for humans

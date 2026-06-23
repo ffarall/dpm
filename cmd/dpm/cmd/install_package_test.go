@@ -11,15 +11,16 @@ import (
 	"strings"
 	"testing"
 
-	"daml.com/x/assistant/pkg/ociindex"
-
 	"daml.com/x/assistant/pkg/assistantconfig"
+	"daml.com/x/assistant/pkg/assistantconfig/assistantremote"
+	"daml.com/x/assistant/pkg/ocilister"
 	"daml.com/x/assistant/pkg/resolution"
 	"daml.com/x/assistant/pkg/testutil"
 	"daml.com/x/assistant/pkg/utils"
 	"github.com/samber/lo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"oras.land/oras-go/v2/registry"
 )
 
 func (suite *MainSuite) TestInstallPackage() {
@@ -71,7 +72,14 @@ func testInstallPackage(t *testing.T, installCommand []string) {
 		regURL, altURL := setupRegistriesAndPublishedComponents(t)
 
 		// run install package
-		require.NoError(t, os.Chdir(testutil.TestdataPath(t, "multi-registry", testutil.OS)))
+
+		tmpProjectDir := t.TempDir()
+		require.NoError(t, utils.CopyFile(
+			filepath.Join(testutil.TestdataPath(t, "multi-registry", "daml.yaml")),
+			filepath.Join(tmpProjectDir, "daml.yaml"),
+		))
+		t.Chdir(tmpProjectDir)
+
 		cmd := createStdTestRootCmd(t, installCommand...)
 		require.NoError(t, cmd.Execute())
 
@@ -81,20 +89,14 @@ func testInstallPackage(t *testing.T, installCommand []string) {
 		// run resolve command
 		deepResolution := runResolveCommand(t)
 		assert.Len(t, deepResolution.Packages, 1)
-		assert.Len(t, lo.Values(deepResolution.Packages)[0].Components, 4)
+		assert.Len(t, lo.Values(deepResolution.Packages)[0].Components, 3)
 
 		checkComponent := checkComponent(t, deepResolution, dpmHome)
-		meepSHA, err := testutil.FindManifestByAnnotation(filepath.Join(dpmHome, "cache"), "meep", "1.2.3")
-		require.NoError(t, err)
-		randoSHA, err := testutil.FindManifestByAnnotation(filepath.Join(dpmHome, "cache"), "rando", "1.2.4")
 		require.NoError(t, err)
 
 		// Test that the cache and dpm resolve use the full URI for `oci://` based components
-		checkComponent(regURL+"/"+"foo/bar/meep", strings.ReplaceAll(meepSHA, ":", "_"))
-		checkComponent(altURL+"/"+"bar/foo/rando", strings.ReplaceAll(randoSHA, ":", "_"))
-
-		// local non `oci://` components
-		assert.Equal(t, testutil.TestdataPath(t, "another-generic-component"), lo.Values(deepResolution.Packages)[0].ComponentsV2["my-local-component"]["path"])
+		checkComponent(regURL+"/"+"foo/bar/meep", "1.2.3")
+		checkComponent(altURL+"/"+"bar/foo/rando", "1.2.4")
 	})
 
 	t.Run("install package with pinning", func(t *testing.T) {
@@ -134,21 +136,14 @@ func testInstallPackage(t *testing.T, installCommand []string) {
 		randoSHA := randoDescriptor.Digest.String()
 		t.Setenv("TEST_RANDO_SHA", randoSHA)
 
-		repoJava, err := client.Repo("components/javabro")
-		require.NoError(t, err)
-		javaDescriptor, err := repoJava.Resolve(ctx, "6.7.8")
-		require.NoError(t, err)
-		javaSHA := javaDescriptor.Digest.String()
-		t.Setenv("TEST_JAVA_SHA", javaSHA)
-
 		cmd := createStdTestRootCmd(t, installCommand...)
-
 		require.NoError(t, cmd.Execute())
+
 		require.NoError(t, createStdTestRootCmd(t, "meep").Execute())
 
 		deepResolution := runResolveCommand(t)
 		assert.Len(t, deepResolution.Packages, 1)
-		assert.Len(t, lo.Values(deepResolution.Packages)[0].Components, 3)
+		assert.Len(t, lo.Values(deepResolution.Packages)[0].Components, 2)
 
 		checkComponent := func(name, version string) {
 			// Test that the cache and dpm resolve use the full URI for `oci://` based components
@@ -158,9 +153,7 @@ func testInstallPackage(t *testing.T, installCommand []string) {
 		}
 
 		// Test that the cache and dpm resolve use the full URsI for `oci://` based components
-		checkComponent(regURL+"/"+"foo/bar/meep", strings.ReplaceAll(meepSHA, ":", "_"))
-		// and use the shorthand for non `oci://` components
-		checkComponent("javabro", strings.ReplaceAll(javaSHA, ":", "_"))
+		checkComponent(regURL+"/"+"foo/bar/meep", "1.2.3")
 
 		t.Run("test that moving tag to new sha doesn't break pinning", func(t *testing.T) {
 			args := testutil.PushComponentUri(reg, fmt.Sprintf("%s/%s:%s", "foo/bar", "meep", "1.2.3"), testutil.TestdataPath(t, "components", "rando"))
@@ -169,59 +162,144 @@ func testInstallPackage(t *testing.T, installCommand []string) {
 			require.NoError(t, cmd.Execute())
 			// assert meep component not overwritten
 			require.NoError(t, createStdTestRootCmd(t, "meep").Execute())
-			checkComponent(regURL+"/"+"foo/bar/meep", strings.ReplaceAll(meepSHA, ":", "_"))
+			checkComponent(regURL+"/"+"foo/bar/meep", "1.2.3")
 		})
+	})
+
+	t.Run("install package with local-filepath components", func(t *testing.T) {
+		localComponentPath := testutil.TestdataPath(t, "another-generic-component")
+
+		testutil.ActivateDamlYamlForTest(t, fmt.Sprintf(`
+components:
+    - name: my-local-component
+      path: %s`, localComponentPath))
+
+		cmd := createStdTestRootCmd(t, installCommand...)
+		require.NoError(t, cmd.Execute())
+
+		deepResolution := runResolveCommand(t)
+		assert.Equal(t, localComponentPath, lo.Values(deepResolution.Packages)[0].ComponentsV2["my-local-component"]["path"])
 	})
 }
 
-func (suite *MainSuite) TestLegacyCacheResolution() {
+func (suite *MainSuite) TestShaPinningForUriComponentsInSinglePackageProject() {
 	t := suite.T()
 
-	cwd, err := os.Getwd()
+	t.Setenv(assistantconfig.DpmShaPinningEnabled, "true")
 
-	require.NoError(t, err)
+	_ = testutil.MkConfig(t)
+	_, reg := testutil.StartRegistry(t)
+	newComponentRepo := "newly/added:4.5.6"
+	newComponent := fmt.Sprintf("oci://%s/%s", testutil.GetRemote(reg).Registry, newComponentRepo)
 
-	t.Cleanup(func() { require.NoError(t, os.Chdir(cwd)) })
+	args := testutil.PushComponentUri(reg, newComponentRepo, testutil.TestdataPath(t, "meepy-component", testutil.OS))
+	require.NoError(t, createStdTestRootCmd(t, args...).Execute())
 
-	installSdk(t, []string{someSdkVersion})
+	projectDir := testutil.ActivateDamlYamlForTest(t, fmt.Sprintf(`
+components:
+  - %s
+`, newComponent))
 
-	c, err := assistantconfig.Get()
-	require.NoError(t, err)
+	t.Run("dpm install appends missing sha256 to oci uri", func(t *testing.T) {
+		cmd := createStdTestRootCmd(t, "install")
+		require.NoError(t, cmd.Execute())
 
-	require.NoError(t, os.Chdir(testutil.TestdataPath(t, "resolve-test", testutil.OS)))
+		ref, err := registry.ParseReference(strings.TrimPrefix(newComponent, "oci://"))
+		require.NoError(t, err)
+		client, err := assistantremote.New(ref.Registry, "", true)
+		require.NoError(t, err)
+		resolvedDigest, _, err := ocilister.FetchManifest(t.Context(), client, ref)
+		require.NoError(t, err)
 
-	deepResolution := runResolveCommand(t)
-	comp := lo.Values(deepResolution.Packages)[0].ComponentsV2["meep"]
-	assert.Len(t, deepResolution.Packages, 1)
-	assert.Equal(t, "1.2.3", comp["version"])
+		newContent, err := os.ReadFile(filepath.Join(projectDir, "daml.yaml"))
+		require.NoError(t, err)
+		assert.Contains(t, string(newContent), newComponent+"@"+resolvedDigest.String())
+	})
 
-	t.Run("test cache still writing to version", func(t *testing.T) {
-		ctx := testutil.Context(t)
-		client, reg := testutil.StartRegistry(t)
+	t.Run("dpm resolve works for sha256 pinned oci components", func(t *testing.T) {
+		resolution := runResolveCommand(t)
+		comps := lo.Values(lo.Values(resolution.Packages)[0].ComponentsV2)
+		assert.Len(t, comps, 1)
+		assert.Equal(t, "4.5.6", comps[0]["version"])
+	})
 
-		// Want to ensure that version is still using handleOCI - push up using internal DA pushComponent
-		testutil.PushComponent(t, ctx, reg, "meep", "1.2.3", testutil.TestdataPath(t, "meepy-component", testutil.OS))
-		require.NoError(t, os.Chdir(testutil.TestdataPath(t, "resolve-test", testutil.OS)))
+	t.Run("dpm installing more than once", func(t *testing.T) {
+		cmd := createStdTestRootCmd(t, "install")
+		require.NoError(t, cmd.Execute())
+	})
+}
 
+func (suite *MainSuite) TestShaPinningForUriComponentsInMultiPackageProject() {
+	t := suite.T()
+
+	t.Setenv(assistantconfig.DpmShaPinningEnabled, "true")
+
+	_ = testutil.MkConfig(t)
+	_, reg := testutil.StartRegistry(t)
+	newComponentRepo := "newly/added:4.5.6"
+	newComponent := fmt.Sprintf("oci://%s/%s", testutil.GetRemote(reg).Registry, newComponentRepo)
+
+	args := testutil.PushComponentUri(reg, newComponentRepo, testutil.TestdataPath(t, "meepy-component", testutil.OS))
+	require.NoError(t, createStdTestRootCmd(t, args...).Execute())
+
+	projectDir := testutil.ActivateMultiPackageYamlForTest(t, fmt.Sprintf(`
+components:
+  - %s
+`, newComponent))
+
+	t.Run("dpm install appends missing sha256 to oci uri", func(t *testing.T) {
 		cmd := createStdTestRootCmd(t, "install", "package")
 		require.NoError(t, cmd.Execute())
 
-		repoMeep, err := client.Repo("components/meep")
+		ref, err := registry.ParseReference(strings.TrimPrefix(newComponent, "oci://"))
 		require.NoError(t, err)
-		meepDescriptor, err := repoMeep.Resolve(ctx, "1.2.3")
+		client, err := assistantremote.New(ref.Registry, "", true)
 		require.NoError(t, err)
-
-		rc, err := repoMeep.Fetch(ctx, meepDescriptor)
-		require.NoError(t, err)
-		defer rc.Close()
-
-		index, _, err := ociindex.FetchIndex(ctx, client, "components/meep", "1.2.3")
+		resolvedDigest, _, err := ocilister.FetchManifest(t.Context(), client, ref)
 		require.NoError(t, err)
 
-		comp := lo.Values(deepResolution.Packages)[0].ComponentsV2["meep"]
-		assert.Equal(t, comp["path"], filepath.Join(c.CachePath, "components", utils.UrlToFilePath("meep"), strings.ReplaceAll(index.Manifests[0].Digest.String(), ":", "_")))
-		assert.Equal(t, "1.2.3", comp["version"])
+		newContent, err := os.ReadFile(filepath.Join(projectDir, "multi-package.yaml"))
+		require.NoError(t, err)
+		assert.Contains(t, string(newContent), newComponent+"@"+resolvedDigest.String())
 	})
+
+	t.Run("dpm installing more than once", func(t *testing.T) {
+		cmd := createStdTestRootCmd(t, "install")
+		require.NoError(t, cmd.Execute())
+	})
+}
+
+func (suite *MainSuite) TestLegacyCacheResolutionForSdkComponentsUnaffectedByShaCaching() {
+	t := suite.T()
+
+	installSdk(t, []string{someSdkVersion})
+
+	deepResolution := runResolveCommand(t)
+	comp := deepResolution.DefaultSDK[someSdkVersion].ComponentsV2["meep"]
+	assert.Equal(t, "1.2.3", comp["version"])
+	assert.Equal(t,
+		filepath.Join(os.Getenv(assistantconfig.DpmHomeEnvVar), "cache", "components", "meep", "1.2.3"),
+		comp["path"])
+}
+
+func (suite *MainSuite) TestLegacyCacheResolutionForShorthandComponentsUnaffectedByShaCaching() {
+	t := suite.T()
+	c := testutil.MkConfig(t)
+
+	ctx := testutil.Context(t)
+	_, reg := testutil.StartRegistry(t)
+
+	// Want to ensure that version is still using handleOCI - push up using internal DA pushComponent
+	testutil.PushComponent(t, ctx, reg, "meep", "1.2.3", testutil.TestdataPath(t, "meepy-component", testutil.OS))
+
+	t.Chdir(testutil.TestdataPath(t, "resolve-test", testutil.OS))
+	cmd := createStdTestRootCmd(t, "install", "package")
+	require.NoError(t, cmd.Execute())
+
+	deepResolution := runResolveCommand(t)
+	comp := lo.Values(deepResolution.Packages)[0].ComponentsV2["meep"]
+	assert.Equal(t, comp["path"], filepath.Join(c.CachePath, "components", "meep", "1.2.3"))
+	assert.Equal(t, "1.2.3", comp["version"])
 }
 
 func checkComponent(t *testing.T, deepResolution *resolution.Resolution, dpmHome string) func(name string, version string) {
