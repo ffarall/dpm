@@ -123,11 +123,21 @@ func (d *DeepResolver) resolvePackageAndDars(ctx context.Context, absPath string
 		return nil, err
 	}
 
-	paths := lo.Map(lock.Dars, func(d *packagelock.Dar, _ int) string {
-		return d.Path
+	lockedDeps := lo.FilterMap(lock.Dars, func(d *packagelock.Dar, _ int) (string, bool) {
+		// For now, the lockfile only contains builtin and OCI dependencies, it doesn't
+		// store local path dependencies. If support is added for local path deps or other
+		// kinds of dependencies, this will need to be updated.
+		if d.URI == nil || d.Path == "" {
+			return "", false
+		}
+		return d.Path, d.URI.Scheme == "builtin" || d.URI.Scheme == "oci"
 	})
-	if len(paths) > 0 {
-		result.ShallowResolution.Imports[resolution.DarImportsFields] = paths
+	if len(lockedDeps) > 0 {
+		resolvedDeps := result.ShallowResolution.Imports[resolution.ResolvedDependenciesField]
+
+		// De-duplicate the dependencies, in case the lockfile contains resolved dependencies
+		// that the resolver already got from `d.resolvePackageDars()`.
+		result.ShallowResolution.Imports[resolution.ResolvedDependenciesField] = lo.Uniq(append(resolvedDeps, lockedDeps...))
 	}
 
 	return result.ShallowResolution, nil
