@@ -4,11 +4,14 @@
 package resolver
 
 import (
+	"net/url"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"daml.com/x/assistant/pkg/assembler"
 	"daml.com/x/assistant/pkg/assistantconfig"
+	"daml.com/x/assistant/pkg/packagelock"
 	"daml.com/x/assistant/pkg/resolution"
 	"daml.com/x/assistant/pkg/sdkmanifest"
 	"daml.com/x/assistant/pkg/testutil"
@@ -53,6 +56,53 @@ func TestMultiPackage(t *testing.T) {
 		assert.Equal(t, resolution.Kind, result.Kind)
 		assert.Equal(t, resolution.ApiVersion, result.APIVersion)
 	})
+}
+
+func TestResolvePathExpandsLockfilePathRelativeToDpmHome(t *testing.T) {
+	dpmHome := filepath.Join(string(filepath.Separator), "tmp", "dpm-home")
+	resolver := &DeepResolver{
+		config: &assistantconfig.Config{DamlHomePath: dpmHome},
+	}
+	ociURI, err := url.Parse("oci://example.com/foo:1.2.3")
+	require.NoError(t, err)
+
+	got := resolver.resolveDarPath(&packagelock.Dar{
+		URI:  ociURI,
+		Path: "${DPM_HOME}/cache/dars/abc/foo.dar",
+	})
+
+	assert.Equal(t, filepath.Join(dpmHome, "cache", "dars", "abc", "foo.dar"), got)
+}
+
+func TestResolvePathExpandsBareRelativeLockfilePathForCompatibility(t *testing.T) {
+	dpmHome := filepath.Join(string(filepath.Separator), "tmp", "dpm-home")
+	resolver := &DeepResolver{
+		config: &assistantconfig.Config{DamlHomePath: dpmHome},
+	}
+	ociURI, err := url.Parse("oci://example.com/foo:1.2.3")
+	require.NoError(t, err)
+
+	got := resolver.resolveDarPath(&packagelock.Dar{
+		URI:  ociURI,
+		Path: "cache/dars/abc/foo.dar",
+	})
+
+	assert.Equal(t, filepath.Join(dpmHome, "cache", "dars", "abc", "foo.dar"), got)
+}
+
+func TestResolvePathLeavesBuiltinLockfilePathRelative(t *testing.T) {
+	resolver := &DeepResolver{
+		config: &assistantconfig.Config{DamlHomePath: filepath.Join(string(filepath.Separator), "tmp", "dpm-home")},
+	}
+	builtinURI, err := url.Parse("builtin://daml-prim")
+	require.NoError(t, err)
+
+	got := resolver.resolveDarPath(&packagelock.Dar{
+		URI:  builtinURI,
+		Path: "daml-prim",
+	})
+
+	assert.Equal(t, "daml-prim", got)
 }
 
 func withResolver(t *testing.T, damlPackagePath string, testFn func(*DeepResolver)) {

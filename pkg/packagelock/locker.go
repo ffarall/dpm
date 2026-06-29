@@ -36,6 +36,8 @@ type Operation int
 const (
 	CheckOnly Operation = iota
 	Regular
+
+	dpmHomePathPrefix = "${DPM_HOME}/"
 )
 
 func New(config *assistantconfig.Config, op Operation) *Locker {
@@ -161,7 +163,10 @@ func (l *Locker) create(ctx context.Context, expected *PackageLock, lockfilePath
 		// TODO this doesn't work for @sha256 pinned refs
 		resolvedRef := ":" + pulledDar.Version.String()
 		d.URI, _ = url.Parse(fmt.Sprintf("oci://%s/%s%s", ref.Registry, ref.Repository, resolvedRef))
-		d.Path = pulledDar.DarFilePath
+		d.Path, err = l.pathRelativeToDpmHome(pulledDar.DarFilePath)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	data, err := yaml.Marshal(expected)
@@ -172,6 +177,18 @@ func (l *Locker) create(ctx context.Context, expected *PackageLock, lockfilePath
 		return nil, err
 	}
 	return expected, nil
+}
+
+func (l *Locker) pathRelativeToDpmHome(path string) (string, error) {
+	if path == "" || !filepath.IsAbs(path) {
+		return path, nil
+	}
+
+	rel, err := filepath.Rel(l.config.DamlHomePath, path)
+	if err != nil {
+		return "", fmt.Errorf("failed to make lockfile path %q relative to DPM_HOME %q: %w", path, l.config.DamlHomePath, err)
+	}
+	return dpmHomePathPrefix + filepath.ToSlash(rel), nil
 }
 
 func (l *Locker) computeExpectedLockfile(packageDirAbsPath string) (*PackageLock, error) {

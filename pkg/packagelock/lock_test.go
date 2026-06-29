@@ -2,8 +2,10 @@ package packagelock
 
 import (
 	"net/url"
+	"path/filepath"
 	"testing"
 
+	"daml.com/x/assistant/pkg/assistantconfig"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -70,4 +72,14 @@ func TestIsInSync(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+func TestPathRelativeToDpmHome(t *testing.T) {
+	dpmHome := filepath.Join(string(filepath.Separator), "tmp", "dpm-home")
+	locker := New(&assistantconfig.Config{DamlHomePath: dpmHome}, Regular)
+
+	got, err := locker.pathRelativeToDpmHome(filepath.Join(dpmHome, "cache", "dars", "abc", "foo.dar"))
+
+	require.NoError(t, err)
+	assert.Equal(t, "${DPM_HOME}/cache/dars/abc/foo.dar", got)
 }

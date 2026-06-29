@@ -25,6 +25,8 @@ import (
 	"github.com/samber/lo"
 )
 
+const dpmHomePathPrefix = "${DPM_HOME}/"
+
 type DeepResolver struct {
 	assembler *assembler.Assembler
 	config    *assistantconfig.Config
@@ -123,14 +125,27 @@ func (d *DeepResolver) resolvePackageAndDars(ctx context.Context, absPath string
 		return nil, err
 	}
 
-	paths := lo.Map(lock.Dars, func(d *packagelock.Dar, _ int) string {
-		return d.Path
+	paths := lo.Map(lock.Dars, func(dar *packagelock.Dar, _ int) string {
+		return d.resolveDarPath(dar)
 	})
 	if len(paths) > 0 {
 		result.ShallowResolution.Imports[resolution.DarImportsFields] = paths
 	}
 
 	return result.ShallowResolution, nil
+}
+
+func (d *DeepResolver) resolveDarPath(dar *packagelock.Dar) string {
+	if dar.URI.Scheme == "builtin" {
+		return dar.Path
+	}
+
+	path := dar.Path
+	if path == "" || filepath.IsAbs(path) {
+		return path
+	}
+	path = strings.TrimPrefix(path, dpmHomePathPrefix)
+	return filepath.Join(d.config.DamlHomePath, filepath.FromSlash(path))
 }
 
 func (d *DeepResolver) resolvePackage(ctx context.Context, absPath string) (*assembler.AssemblyResult, error) {
